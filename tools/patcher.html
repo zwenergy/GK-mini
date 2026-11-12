@@ -1,0 +1,216 @@
+<html>
+<head>
+<meta charset="utf-8">
+<title>UF2 ROM Patcher for GK mini (PM2040)</title>
+<h1>UF2 ROM Patcher for GK mini (PM2040)</h1>
+</head>
+<body>
+
+  <p>
+  <label for="file">GK mini UF2 File: </label>
+  <input type="file" id="file" accept=".uf2" />
+  </p>
+  <p>
+  <label for="biosfile">GameKing BIOS (gm218.bin, 512 KB): </label>
+  <input type="file" id="biosfile" />
+  </p>
+  <p>
+  <label for="romfile">GameKing ROM File: </label>
+  <input type="file" id="romfile" />
+  </p>
+  <p>
+  <input type="checkbox" name="doSleepPatching" value="doPatching" id="doSleepPatching" checked>
+  <label for="doSleepPatching">Patch out the BIOS auto-sleep?*</label><br>
+  </p>
+  <p>
+  <button id="read-file">Patch</button>
+  </p>
+  <p id="status"></p>
+
+  <br><i>*(Without the patch the GameKing blanks the screen after about two minutes without input and only wakes up after START is held for about two seconds. The patch is only applied if the BIOS matches.)</i>
+
+
+  <script>
+  // Flash layout of GK mini (see code/main.c).
+  const XIP_BASE = 0x10000000;
+  const INFO_OFFSET = 0x03F000;
+  const BIOS_OFFSET = 0x040000;
+  const ROM_OFFSET = 0x0C0000;
+  const BIOS_SIZE = 0x80000;
+  const FLASH_SIZE = 0x200000;
+
+  const UF2_MAGIC0 = 0x0A324655;
+  const UF2_MAGIC1 = 0x9E5D5157;
+  const UF2_MAGIC_END = 0x0AB16F30;
+  const UF2_FLAG_FAMILY = 0x00002000;
+  const RP2040_FAMILY = 0xE48BFF56;
+
+  // BIOS auto-sleep patch [ flat address, old val, new val ]
+  // (same patch sites as the GameKing MiSTer core).
+  const sleepPatchData = [
+    [ 0x06C0D, 0xD0, 0xEA ],
+    [ 0x06C0E, 0x48, 0xEA ],
+    [ 0x04886, 0xD0, 0x80 ],
+    [ 0x042D7, 0xB2, 0x60 ]
+  ];
+
+  function lendian32( arr, base ) {
+    return ( arr[ base ] + ( arr[ base + 1 ] * 256 ) + ( arr[ base + 2 ] * 65536 ) + ( arr[ base + 3 ] * 16777216 ) );
+  }
+
+  function setLendian32( arr, base, val ) {
+    arr[ base ] = val & 0xFF;
+    arr[ base + 1 ] = ( val >>> 8 ) & 0xFF;
+    arr[ base + 2 ] = ( val >>> 16 ) & 0xFF;
+    arr[ base + 3 ] = ( val >>> 24 ) & 0xFF;
+  }
+
+  function saveByteArray( filename, data ) {
+    var blob = new Blob([data], {type: "application/octet-stream"});
+    var link = document.createElement('a');
+    link.href = window.URL.createObjectURL(blob);
+    link.download = filename;
+    link.click();
+  };
+
+  function status( msg ) {
+    console.log( msg );
+    if ( typeof document !== "undefined" )
+      document.querySelector("#status").textContent = msg;
+  }
+
+  // Put data into the page map (flash address -> 256 byte page).
+  function addRegion( pages, flashOffset, data ) {
+    for ( let i = 0; i < data.length; i += 256 ) {
+      var page = new Uint8Array( 256 ).fill( 0xFF );
+      page.set( data.subarray( i, Math.min( i + 256, data.length ) ) );
+      pages.set( XIP_BASE + flashOffset + i, page );
+    }
+  }
+
+  // Builds the patched UF2. Returns { uf2, log } or throws an Error.
+  function buildUF2( uf2array, biosarray, romarray, doSleepPatching ) {
+    var log = [];
+
+    // Read the firmware pages out of the UF2.
+    var pages = new Map();
+    var fwEnd = 0;
+    for ( let i = 0; i + 512 <= uf2array.length; i += 512 ) {
+      if ( lendian32( uf2array, i ) != UF2_MAGIC0 || lendian32( uf2array, i + 4 ) != UF2_MAGIC1 )
+        continue;
+      if ( lendian32( uf2array, i + 508 ) != UF2_MAGIC_END )
+        continue;
+      var flags = lendian32( uf2array, i + 8 );
+      if ( flags & 1 ) // Not main flash.
+        continue;
+      var addr = lendian32( uf2array, i + 12 );
+      var size = lendian32( uf2array, i + 16 );
+      // Only keep the firmware itself (an old patched file may be reused).
+      if ( addr - XIP_BASE >= INFO_OFFSET )
+        continue;
+      var page = new Uint8Array( 256 ).fill( 0xFF );
+      page.set( uf2array.subarray( i + 32, i + 32 + Math.min( size, 256 ) ) );
+      pages.set( addr, page );
+      fwEnd = Math.max( fwEnd, addr + 256 - XIP_BASE );
+    }
+    if ( pages.size == 0 )
+      throw new Error( "No UF2 data found. Is this the GK mini UF2?" );
+
+    // BIOS.
+    if ( biosarray.length != BIOS_SIZE )
+      throw new Error( "BIOS must be " + BIOS_SIZE + " bytes (got " + biosarray.length + ")." );
+    var bios = new Uint8Array( biosarray );
+    var infoFlags = 0;
+    if ( doSleepPatching ) {
+      var match = sleepPatchData.every( p => bios[ p[ 0 ] ] == p[ 1 ] );
+      if ( match ) {
+        for ( let p of sleepPatchData )
+          bios[ p[ 0 ] ] = p[ 2 ];
+        infoFlags |= 1;
+        log.push( "BIOS auto-sleep patched out." );
+      } else {
+        log.push( "BIOS not recognised, auto-sleep patch skipped." );
+      }
+    }
+
+    // ROM.
+    var maxRom = FLASH_SIZE - ROM_OFFSET;
+    if ( romarray.length > maxRom )
+      throw new Error( "ROM is " + romarray.length + " bytes, at most " + maxRom + " fit." );
+
+    // Info block: magic "GKMINI\0\1", BIOS size, ROM size, flags.
+    var info = new Uint8Array( 20 );
+    var magic = [ 0x47, 0x4B, 0x4D, 0x49, 0x4E, 0x49, 0x00, 0x01 ];
+    info.set( magic );
+    setLendian32( info, 8, BIOS_SIZE );
+    setLendian32( info, 12, romarray.length );
+    setLendian32( info, 16, infoFlags );
+
+    addRegion( pages, INFO_OFFSET, info );
+    addRegion( pages, BIOS_OFFSET, bios );
+    if ( romarray.length )
+      addRegion( pages, ROM_OFFSET, romarray );
+
+    // One contiguous image: fill gaps with erased pages.
+    var addrs = Array.from( pages.keys() );
+    var lo = Math.min( ...addrs ), hi = Math.max( ...addrs );
+    for ( let a = lo; a <= hi; a += 256 )
+      if ( !pages.has( a ) )
+        pages.set( a, new Uint8Array( 256 ).fill( 0xFF ) );
+    addrs = Array.from( pages.keys() ).sort( ( a, b ) => a - b );
+
+    // Write the UF2 blocks.
+    var out = new Uint8Array( addrs.length * 512 );
+    for ( let n = 0; n < addrs.length; n++ ) {
+      var b = n * 512;
+      setLendian32( out, b + 0, UF2_MAGIC0 );
+      setLendian32( out, b + 4, UF2_MAGIC1 );
+      setLendian32( out, b + 8, UF2_FLAG_FAMILY );
+      setLendian32( out, b + 12, addrs[ n ] );
+      setLendian32( out, b + 16, 256 );
+      setLendian32( out, b + 20, n );
+      setLendian32( out, b + 24, addrs.length );
+      setLendian32( out, b + 28, RP2040_FAMILY );
+      out.set( pages.get( addrs[ n ] ), b + 32 );
+      setLendian32( out, b + 508, UF2_MAGIC_END );
+    }
+    log.push( "Done: firmware " + fwEnd + " B, ROM " + romarray.length + " B, " + addrs.length + " blocks." );
+    return { uf2: out, log: log };
+  }
+
+  function readFile( input ) {
+    return new Promise( ( resolve, reject ) => {
+      var reader = new FileReader();
+      reader.onload = e => resolve( new Uint8Array( e.target.result ) );
+      reader.onerror = () => reject( reader.error );
+      reader.readAsArrayBuffer( input.files[ 0 ] );
+    } );
+  }
+
+  if ( typeof document !== "undefined" ) {
+    document.querySelector("#read-file").addEventListener('click', async function() {
+      var uf2In = document.querySelector("#file");
+      var biosIn = document.querySelector("#biosfile");
+      var romIn = document.querySelector("#romfile");
+      if ( uf2In.value == '' ) { status( "No UF2 file selected." ); return; }
+      if ( biosIn.value == '' ) { status( "No BIOS file selected." ); return; }
+      if ( romIn.value == '' ) { status( "No ROM file selected." ); return; }
+
+      try {
+        var uf2array = await readFile( uf2In );
+        var biosarray = await readFile( biosIn );
+        var romarray = await readFile( romIn );
+        var doSleepPatching = document.querySelector("#doSleepPatching").checked;
+        var res = buildUF2( uf2array, biosarray, romarray, doSleepPatching );
+        status( res.log.join( " " ) );
+        var name = romIn.files[ 0 ].name.replace( /\.[^.]*$/, "" );
+        saveByteArray( "GKmini_" + name + ".uf2", res.uf2 );
+      } catch ( err ) {
+        status( "Error: " + err.message );
+      }
+    });
+  }
+  </script>
+
+</body>
+</html>
