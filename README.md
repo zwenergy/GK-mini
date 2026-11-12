@@ -40,7 +40,7 @@ The audio stream also paces the emulator: when the sample buffer is full, the em
 ## Usage
 You need a [PM2040](https://github.com/zwenergy/PM2040)-based flash cart, a GameKing BIOS dump (`gm218.bin`, 512 KB, as used by MAME and the MiSTer core) and a GameKing cartridge ROM.
 
-Build a flashable UF2 with the online patcher (`tools/patcher.html`, a single static page that runs entirely in the browser): select the GK mini UF2, the BIOS and the game ROM, then click Patch.
+Build a flashable UF2 with the [online patcher](https://zwenergy.github.io/GKminiPatch/index.html): select the GK mini UF2, the BIOS and the game ROM, then click Patch.
 
 Or use the command-line tool, which produces the identical file:
 
