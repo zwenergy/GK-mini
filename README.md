@@ -1,5 +1,5 @@
 # GK mini
-A Timetop GameKing emulator on the Pokemon mini.
+An AI-slopped Timetop GameKing emulator on the Pokemon mini.
 
 ## Overview
 GK mini emulates the Timetop GameKing (GM-218, also GameKing II) "on" the Pokemon mini via the [PM2040](https://github.com/zwenergy/PM2040) flash cart.
